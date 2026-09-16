@@ -73,7 +73,7 @@ class MatrixService {
     };
   }
 
-  private createMatrixClient(session: MatrixSession): MatrixClient {
+  private createMatrixClient(session: MatrixSession, guest = false): MatrixClient {
     const client = createClient({
       baseUrl: MATRIX_BASE_URL,
       userId: session.userId,
@@ -81,10 +81,11 @@ class MatrixService {
       deviceId: session.deviceId,
     });
 
-    client.setGuest(true);
-
-    if (!client.isGuest()) {
-      throw new Error("matrix-js-sdk không nhận diện client là Guest.");
+    if (guest) {
+      client.setGuest(true);
+      if (!client.isGuest()) {
+        throw new Error("matrix-js-sdk không nhận diện client là Guest.");
+      }
     }
 
     this.registerEvents(client);
@@ -311,7 +312,7 @@ class MatrixService {
       return;
     }
 
-    console.log("[Matrix] Guest invited:", room.roomId);
+    console.log("[Matrix] User invited:", room.roomId);
 
     try {
       await this.client.joinRoom(room.roomId);
@@ -322,6 +323,31 @@ class MatrixService {
     } catch (error) {
       console.error("[Matrix] JOIN FAILED:", room.roomId, error);
     }
+  }
+
+  async start(session: MatrixSession): Promise<MatrixClient> {
+    if (!session?.userId || !session?.accessToken) {
+      throw new Error("Matrix session không hợp lệ.");
+    }
+
+    console.log("[Matrix] ====================");
+    console.log("[Matrix] start()");
+    this.stop();
+    this.emittedRooms.clear();
+    this.emittedMessages.clear();
+
+    const client = this.createMatrixClient(session, false);
+    this.client = client;
+
+    console.log("[Matrix] User:", client.getUserId());
+    console.log("[Matrix] Device:", session.deviceId);
+    console.log("[Matrix] Guest:", client.isGuest());
+
+    client.startClient({ initialSyncLimit: 20 });
+
+    console.log("[Matrix] Client started.");
+    console.log("[Matrix] ====================");
+    return client;
   }
 
   async startAsGuest(): Promise<MatrixClient> {
@@ -347,7 +373,7 @@ class MatrixService {
         deviceId: session.deviceId,
       });
 
-      const client = this.createMatrixClient(session);
+      const client = this.createMatrixClient(session, true);
 
       this.client = client;
 
@@ -365,6 +391,41 @@ class MatrixService {
     } finally {
       this.creatingGuest = false;
     }
+  }
+
+  async waitForJoinedRoom(roomId: string, timeoutMs = 30000): Promise<Room> {
+    if (!roomId) {
+      throw new Error("roomId là bắt buộc.");
+    }
+
+    const existing = this.getRoom(roomId);
+    if (existing?.getMyMembership() === "join") {
+      return existing;
+    }
+
+    return await new Promise<Room>((resolve, reject) => {
+      let settled = false;
+      const finish = (callback: () => void) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        unsubscribeRoom();
+        unsubscribeSync();
+        callback();
+      };
+      const check = () => {
+        const room = this.getRoom(roomId);
+        if (room?.getMyMembership() === "join") finish(() => resolve(room));
+      };
+      const unsubscribeRoom = this.onRoom((room) => {
+        if (room.roomId === roomId) check();
+      });
+      const unsubscribeSync = this.onSync((state) => {
+        if (state === "PREPARED" || state === "SYNCING") check();
+      });
+      const timeout = window.setTimeout(() => finish(() => reject(new Error(`Chưa tham gia được phòng hỗ trợ sau ${Math.ceil(timeoutMs / 1000)} giây.`))), timeoutMs);
+      check();
+    });
   }
 
   getJoinedRooms(): Room[] {
@@ -411,7 +472,7 @@ class MatrixService {
     }
 
     if (room.getMyMembership() !== "join") {
-      throw new Error("Guest chưa tham gia phòng.");
+      throw new Error("Người dùng chưa tham gia phòng.");
     }
 
     console.log("[Matrix] Sending message:", {
@@ -434,7 +495,7 @@ class MatrixService {
     }
 
     if (room.getMyMembership() !== "join") {
-      throw new Error("Guest chưa tham gia phòng.");
+      throw new Error("Người dùng chưa tham gia phòng.");
     }
 
     console.log("[Matrix] Uploading media:", {
@@ -615,7 +676,7 @@ class MatrixService {
       return;
     }
 
-    console.log("[Matrix] Closing Guest session locally...", {
+    console.log("[Matrix] Closing Matrix session locally...", {
       userId: client.getUserId(),
     });
 
